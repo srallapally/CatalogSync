@@ -18,35 +18,6 @@ def get_access_token(token_url: str, client_id: str, client_secret: str) -> str:
     response.raise_for_status()
     return response.json()['access_token']
 
-def fetch_glossary_schema(api_url: str, token_url: str, client_id: str, client_secret: str) -> Dict[str, Any]:
-    """
-    Fetch JSON data from the provided API URL using client credentials flow.
-    """
-    # Get the access token
-    access_token = get_access_token(token_url, client_id, client_secret)
-    # Use the access token to fetch data from the API
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
-    body = {
-        "targetFilter": {
-            "operator": "AND",
-            "operand": [
-                {
-                    "operator": "EQUALS",
-                    "operand": {
-                        "targetName": "objectType",
-                        "targetValue": "/openidm/managed/assignment"
-                    }
-                }
-            ]
-        }
-    }
-    response = requests.post(api_url, headers=headers, json=body)
-    response.raise_for_status()  # Raise an exception for HTTP errors
-    return response.json()
-
 def fetch_data_from_api(api_url: str, search_string:str, access_token: str,page:str) -> Dict[str, Any]:
     api_url = f"{api_url}&pageNumber={page}"
     """
@@ -81,58 +52,63 @@ def fetch_data_from_api(api_url: str, search_string:str, access_token: str,page:
                 ]
             }
     }
-    #print(api_url)
+
     response = requests.post(api_url, headers=headers, json=body)
+    #print(response.json())
     response.raise_for_status()
     return response.json()
 
-def flatten_glossary(glossary: Dict[str, Any]) -> Dict[str, Any]:
-    """Flatten nested glossary objects."""
-    flat = {}
-    for key, value in glossary.items():
-        if isinstance(value, dict):
-            for sub_key, sub_value in value.items():
-                flat[f"{key}_{sub_key}"] = sub_value if sub_value is not None and sub_value != "" else ""
-        else:
-            flat[key] = value if value is not None and value != "" else ""
-    return flat
+def extract_entitlement_data(result):
+    try:
+        entitlement = result['glossary']['idx']['/entitlement']
+        return {
+            'id': result.get('id', 'Unknown'),
+            'glossary': entitlement
+        }
+    except KeyError:
+        return {
+            'id': result.get('id', 'Unknown'),
+            'entitlement': None
+        }
 
-def get_all_headers(data: List[Dict[str, Any]]) -> List[str]:
-    """Get all unique headers from the data."""
-    headers = set(["id"])
-    for item in data:
-        if "objGlossary" in item:
-            headers.update(flatten_glossary(item["objGlossary"]).keys())
-    return sorted(list(headers))
 
-def process_headers_data(json_data: Dict[str, Any]) -> List[List[str]]:
+def write_to_csv(data: List[Dict[str, Any]], output_file: str, attribute_string: str):
     """
-    Process the JSON data and return headers and sample data.
+    Write the extracted data to a CSV file.
     """
-    if "result" not in json_data or not isinstance(json_data["result"], list):
-        raise ValueError("Invalid JSON structure: 'result' key not found or not a list")
+    headers = ['id'] + attribute_string.split(',')
 
-    headers = [field["name"] for field in json_data["result"]]
-    return headers
+    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=headers, quoting=csv.QUOTE_ALL)
+        writer.writeheader()
+
+        for item in data:
+            row = {'id': item['id']}
+            glossary = item.get('glossary', {})
+            for attr in headers[1:]:  # Skip 'id' as it's already added
+                row[attr] = glossary.get(attr, '')
+            writer.writerow(row)
 
 def main():
     # Configuration
-    base_url = "https://<CHANGE ME>.forgeblocks.com"
+    base_url = "<CHANGE_ME>"
     token_url = f"{base_url}/am/oauth2/alpha/access_token"
-    entitlement_url = f"{base_url}/iga/governance/resource/search?pageSize=10&sortBy=application.name&sortDir=desc"
-    glossary_schema_url = f"{base_url}/iga/commons/glossary/schema/search?pageNumber=0&pageSize=10&sortBy=name&sortDir=asc"
-    client_id = "<CHANGE ME>"
-    client_secret = "<CHANGE ME>"
-    output_file = "<CHANGE ME>"
+    entitlement_url = f"{base_url}/iga/governance/resource/search?_fields=id,glossary,objGlossary&pageSize=10&sortBy=application.name&sortDir=desc"
 
+    client_id = "<CHANGE_ME>"
+    client_secret = "<CHANGE_ME>"
+    output_file = "entitlement_export.csv"
+    attribute_string = "isSensitive,is_privileged,lob_owner,requestable,approverRole,certFreq,classification,description,entitlementOwner"
     try:
         # Get access token
         access_token = get_access_token(token_url, client_id, client_secret)
-
-        # Fetch data from API
+        access_token = "<CHANGE ME>"
+        # Fetch data from API)
         data = fetch_data_from_api(entitlement_url, "SNOW", access_token,0)
         # Initialize a list to store all items
-        all_items = data.get("result", [])
+
+        all_items_glossary = [extract_entitlement_data(result) for result in data.get("result", [])]
+
         total_rows = data["totalCount"]
         rows_per_page = 10
         pages = math.ceil(total_rows / rows_per_page)
@@ -141,28 +117,11 @@ def main():
             # Adjust the URL or parameters for pagination
             paginated_data = fetch_data_from_api(entitlement_url, "SNOW", access_token, page=page)
             # Append new items to the all_items list
-            all_items.extend(paginated_data.get("result", []))
+            all_items_glossary.extend([extract_entitlement_data(result) for result in paginated_data.get("result", [])])
 
-        # Get all headers
-        headers = get_all_headers(data["result"])
-
-        entitlement_glossary_schema = fetch_glossary_schema(glossary_schema_url, token_url, client_id, client_secret)
-        entitlement_headers = process_headers_data(entitlement_glossary_schema)
-        # Write to CSV
-        with open(output_file, 'w', newline='') as f:
-            all_headers = headers + entitlement_headers
-            writer = csv.DictWriter(f, fieldnames=all_headers, quoting=csv.QUOTE_ALL)
-            writer.writeheader()  # Write header only if the file is newly created
-            for item in all_items:
-                row = {header: "" for header in all_headers}
-                row["id"] = item.get("id")
-                if "objGlossary" in item and item["objGlossary"]:
-                    flattened = flatten_glossary(item["objGlossary"])
-                    row.update({k: str(v) if v is not None else "" for k, v in flattened.items() if k in all_headers})
-                writer.writerow(row)
-
-        print(f"CSV file '{output_file}' has been generated successfully.")
-
+        # Write data to CSV
+        write_to_csv(all_items_glossary, output_file, attribute_string)
+        print(f"Data successfully exported to {output_file}")
     except requests.RequestException as e:
         print(f"Error fetching data from API: {e}")
     except KeyError as e:
